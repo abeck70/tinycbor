@@ -129,6 +129,9 @@ template <size_t N> QByteArray raw(const char (&data)[N])
     return QByteArray::fromRawData(data, N - 1);
 }
 
+struct NegativeInteger { quint64 abs; };
+Q_DECLARE_METATYPE(NegativeInteger)
+
 struct SimpleType { uint8_t type; };
 Q_DECLARE_METATYPE(SimpleType)
 
@@ -209,6 +212,8 @@ CborError encodeVariant(CborEncoder *encoder, const QVariant &v)
     }
 
     default:
+        if (type == qMetaTypeId<NegativeInteger>())
+            return cbor_encode_negative_int(encoder, v.value<NegativeInteger>().abs);
         if (type == qMetaTypeId<SimpleType>())
             return cbor_encode_simple_value(encoder, v.value<SimpleType>().type);
 #if QT_VERSION < QT_VERSION_CHECK(5, 9, 0)
@@ -267,7 +272,6 @@ CborError encodeVariant(CborEncoder *encoder, const QVariant &v)
     return CborErrorUnknownType;
 }
 
-bool compareFailed;
 void compare(const QVariant &input, const QByteArray &output)
 {
     QByteArray buffer(output.length(), Qt::Uninitialized);
@@ -276,7 +280,7 @@ void compare(const QVariant &input, const QByteArray &output)
     cbor_encoder_init(&encoder, bufptr, buffer.length(), 0);
 
     QCOMPARE(encodeVariant(&encoder, input), CborNoError);
-    QCOMPARE(encoder.added, size_t(1));
+    QCOMPARE(encoder.remaining, size_t(1));
     QCOMPARE(cbor_encoder_get_extra_bytes_needed(&encoder), size_t(0));
 
     buffer.resize(int(cbor_encoder_get_buffer_size(&encoder, bufptr)));
@@ -306,7 +310,7 @@ void addFixedData()
     QTest::newRow("UINT64_MAX") << raw("\x1b" "\xff\xff\xff\xff" "\xff\xff\xff\xff")
                                 << QVariant(std::numeric_limits<quint64>::max());
 
-    // signed integers containing positive numbers
+    // signed integers containing non-negative numbers
     QTest::newRow("0") << raw("\x00") << QVariant(0);
     QTest::newRow("1") << raw("\x01") << QVariant(1);
     QTest::newRow("10") << raw("\x0a") << QVariant(10);
@@ -319,7 +323,7 @@ void addFixedData()
     QTest::newRow("4294967295") << raw("\x1a\xff\xff\xff\xff") << QVariant(Q_INT64_C(4294967295));
     QTest::newRow("4294967296") << raw("\x1b\0\0\0\1\0\0\0\0") << QVariant(Q_INT64_C(4294967296));
 
-    // negative integers
+    // signed integers containing negative numbers
     QTest::newRow("-1") << raw("\x20") << QVariant(-1);
     QTest::newRow("-2") << raw("\x21") << QVariant(-2);
     QTest::newRow("-24") << raw("\x37") << QVariant(-24);
@@ -330,8 +334,22 @@ void addFixedData()
     QTest::newRow("-UINT16_MAX-1") << raw("\x3a\0\1\x00\x00") << QVariant(-65537);
     QTest::newRow("-UINT32_MAX") << raw("\x3a\xff\xff\xff\xff") << QVariant(Q_INT64_C(-4294967296));
     QTest::newRow("-UINT32_MAX-1") << raw("\x3b\0\0\0\1\0\0\0\0") << QVariant(Q_INT64_C(-4294967297));
-//    QTest::newRow("-UINT64_MAX") << raw("\x3b" "\xff\xff\xff\xff" "\xff\xff\xff\xff")
-//                                 << QVariant::fromValue(BigNegative{std::numeric_limits<quint64>::max()});
+
+    // negative integers
+    auto neg = [](quint64 v) { return QVariant::fromValue<NegativeInteger>({v}); };
+    QTest::newRow("negative1") << raw("\x20") << neg(1);
+    QTest::newRow("negative2") << raw("\x21") << neg(2);
+    QTest::newRow("negative24") << raw("\x37") << neg(24);
+    QTest::newRow("negative25") << raw("\x38\x18") << neg(25);
+    QTest::newRow("negativeUINT8_MAX") << raw("\x38\xff") << neg(256);
+    QTest::newRow("negativeUINT8_MAX-1") << raw("\x39\x01\x00") << neg(257);
+    QTest::newRow("negativeUINT16_MAX") << raw("\x39\xff\xff") << neg(65536);
+    QTest::newRow("negativeUINT16_MAX-1") << raw("\x3a\0\1\x00\x00") << neg(65537);
+    QTest::newRow("negativeUINT32_MAX") << raw("\x3a\xff\xff\xff\xff") << neg(Q_UINT64_C(4294967296));
+    QTest::newRow("negativeUINT32_MAX-1") << raw("\x3b\0\0\0\1\0\0\0\0") << neg(Q_UINT64_C(4294967297));
+    QTest::newRow("negativeUINT64_MAX") << raw("\x3b" "\xff\xff\xff\xff" "\xff\xff\xff\xfe")
+                                        << neg(std::numeric_limits<quint64>::max());
+    QTest::newRow("negativeUINT64_MAX+1") << raw("\x3b" "\xff\xff\xff\xff" "\xff\xff\xff\xff") << neg(0);
 
     QTest::newRow("simple0") << raw("\xe0") << QVariant::fromValue(SimpleType{0});
     QTest::newRow("simple19") << raw("\xf3") << QVariant::fromValue(SimpleType{19});
@@ -493,34 +511,34 @@ void tst_Encoder::tags()
     QFETCH(QByteArray, output);
 
     compare(QVariant::fromValue(Tag{1, input}), "\xc1" + output);
-    if (compareFailed) return;
+    if (QTest::currentTestFailed()) return;
 
     compare(QVariant::fromValue(Tag{24, input}), "\xd8\x18" + output);
-    if (compareFailed) return;
+    if (QTest::currentTestFailed()) return;
 
     compare(QVariant::fromValue(Tag{255, input}), "\xd8\xff" + output);
-    if (compareFailed) return;
+    if (QTest::currentTestFailed()) return;
 
     compare(QVariant::fromValue(Tag{256, input}), raw("\xd9\1\0") + output);
-    if (compareFailed) return;
+    if (QTest::currentTestFailed()) return;
 
     compare(QVariant::fromValue(Tag{CborSignatureTag, input}), raw("\xd9\xd9\xf7") + output);
-    if (compareFailed) return;
+    if (QTest::currentTestFailed()) return;
 
     compare(QVariant::fromValue(Tag{65535, input}), raw("\xd9\xff\xff") + output);
-    if (compareFailed) return;
+    if (QTest::currentTestFailed()) return;
 
     compare(QVariant::fromValue(Tag{65536, input}), raw("\xda\0\1\0\0") + output);
-    if (compareFailed) return;
+    if (QTest::currentTestFailed()) return;
 
     compare(QVariant::fromValue(Tag{UINT32_MAX, input}), raw("\xda\xff\xff\xff\xff") + output);
-    if (compareFailed) return;
+    if (QTest::currentTestFailed()) return;
 
     compare(QVariant::fromValue(Tag{UINT32_MAX + Q_UINT64_C(1), input}), raw("\xdb\0\0\0\1\0\0\0\0") + output);
-    if (compareFailed) return;
+    if (QTest::currentTestFailed()) return;
 
     compare(QVariant::fromValue(Tag{UINT64_MAX, input}), raw("\xdb\xff\xff\xff\xff\xff\xff\xff\xff") + output);
-    if (compareFailed) return;
+    if (QTest::currentTestFailed()) return;
 
     // nested tags
     compare(QVariant::fromValue(Tag{1, QVariant::fromValue(Tag{1, input})}), "\xc1\xc1" + output);
@@ -532,10 +550,10 @@ void tst_Encoder::arrays()
     QFETCH(QByteArray, output);
 
     compare(make_list(input), "\x81" + output);
-    if (compareFailed) return;
+    if (QTest::currentTestFailed()) return;
 
     compare(make_list(input, input), "\x82" + output + output);
-    if (compareFailed) return;
+    if (QTest::currentTestFailed()) return;
 
     {
         QVariantList list{input};
@@ -547,7 +565,7 @@ void tst_Encoder::arrays()
             longoutput += longoutput;
         }
         compare(list, "\x98\x20" + longoutput);
-        if (compareFailed) return;
+        if (QTest::currentTestFailed()) return;
 
         // now 256 elements (32 << 3)
         for (int i = 0; i < 3; ++i) {
@@ -555,18 +573,18 @@ void tst_Encoder::arrays()
             longoutput += longoutput;
         }
         compare(list, raw("\x99\1\0") + longoutput);
-        if (compareFailed) return;
+        if (QTest::currentTestFailed()) return;
     }
 
     // nested lists
     compare(make_list(make_list(input)), "\x81\x81" + output);
-    if (compareFailed) return;
+    if (QTest::currentTestFailed()) return;
 
     compare(make_list(make_list(input, input)), "\x81\x82" + output + output);
-    if (compareFailed) return;
+    if (QTest::currentTestFailed()) return;
 
     compare(make_list(make_list(input), input), "\x82\x81" + output + output);
-    if (compareFailed) return;
+    if (QTest::currentTestFailed()) return;
 
     compare(make_list(make_list(input), make_list(input)), "\x82\x81" + output + "\x81" + output);
 }
@@ -577,13 +595,13 @@ void tst_Encoder::maps()
     QFETCH(QByteArray, output);
 
     compare(make_map({{1, input}}), "\xa1\1" + output);
-    if (compareFailed) return;
+    if (QTest::currentTestFailed()) return;
 
     compare(make_map({{1, input}, {input, 24}}), "\xa2\1" + output + output + "\x18\x18");
-    if (compareFailed) return;
+    if (QTest::currentTestFailed()) return;
 
     compare(make_map({{input, input}}), "\xa1" + output + output);
-    if (compareFailed) return;
+    if (QTest::currentTestFailed()) return;
 
     {
         Map map{{1, input}};
@@ -595,7 +613,7 @@ void tst_Encoder::maps()
             longoutput += longoutput;
         }
         compare(QVariant::fromValue(map), "\xb8\x20" + longoutput);
-        if (compareFailed) return;
+        if (QTest::currentTestFailed()) return;
 
         // now 256 elements (32 << 3)
         for (int i = 0; i < 3; ++i) {
@@ -603,18 +621,18 @@ void tst_Encoder::maps()
             longoutput += longoutput;
         }
         compare(QVariant::fromValue(map), raw("\xb9\1\0") + longoutput);
-        if (compareFailed) return;
+        if (QTest::currentTestFailed()) return;
     }
 
-    // nested lists
+    // nested maps
     compare(make_map({{1, make_map({{2, input}})}}), "\xa1\1\xa1\2" + output);
-    if (compareFailed) return;
+    if (QTest::currentTestFailed()) return;
 
     compare(make_map({{1, make_map({{2, input}, {input, false}})}}), "\xa1\1\xa2\2" + output + output + "\xf4");
-    if (compareFailed) return;
+    if (QTest::currentTestFailed()) return;
 
     compare(make_map({{1, make_map({{2, input}})}, {input, false}}), "\xa2\1\xa1\2" + output + output + "\xf4");
-    if (compareFailed) return;
+    if (QTest::currentTestFailed()) return;
 }
 
 void tst_Encoder::shortBuffer()
@@ -626,7 +644,7 @@ void tst_Encoder::shortBuffer()
     for (int len = 0; len < output.length(); ++len) {
         CborEncoder encoder;
         cbor_encoder_init(&encoder, reinterpret_cast<quint8 *>(buffer.data()), len, 0);
-        QCOMPARE(int(encodeVariant(&encoder, input)), int(CborErrorOutOfMemory));
+        QCOMPARE(encodeVariant(&encoder, input), CborErrorOutOfMemory);
         QVERIFY(cbor_encoder_get_extra_bytes_needed(&encoder) != 0);
         QCOMPARE(len + cbor_encoder_get_extra_bytes_needed(&encoder), size_t(output.length()));
     }
@@ -642,7 +660,7 @@ void tst_Encoder::tooShortArrays()
     cbor_encoder_init(&encoder, reinterpret_cast<quint8 *>(buffer.data()), buffer.length(), 0);
     QCOMPARE(cbor_encoder_create_array(&encoder, &container, 2), CborNoError);
     QCOMPARE(encodeVariant(&container, input), CborNoError);
-    QCOMPARE(container.added, size_t(1));
+    QCOMPARE(container.remaining, size_t(2));
     QCOMPARE(cbor_encoder_close_container_checked(&encoder, &container), CborErrorTooFewItems);
 }
 
@@ -656,7 +674,7 @@ void tst_Encoder::tooShortMaps()
     cbor_encoder_init(&encoder, reinterpret_cast<quint8 *>(buffer.data()), buffer.length(), 0);
     QCOMPARE(cbor_encoder_create_map(&encoder, &container, 2), CborNoError);
     QCOMPARE(encodeVariant(&container, input), CborNoError);
-    QCOMPARE(container.added, size_t(1));
+    QCOMPARE(container.remaining, size_t(4));
     QCOMPARE(cbor_encoder_close_container_checked(&encoder, &container), CborErrorTooFewItems);
 }
 
@@ -671,7 +689,7 @@ void tst_Encoder::tooBigArrays()
     QCOMPARE(cbor_encoder_create_array(&encoder, &container, 1), CborNoError);
     QCOMPARE(encodeVariant(&container, input), CborNoError);
     QCOMPARE(encodeVariant(&container, input), CborNoError);
-    QCOMPARE(container.added, size_t(2));
+    QCOMPARE(container.remaining, size_t(0));
     QCOMPARE(cbor_encoder_close_container_checked(&encoder, &container), CborErrorTooManyItems);
 }
 
@@ -687,7 +705,7 @@ void tst_Encoder::tooBigMaps()
     QCOMPARE(encodeVariant(&container, input), CborNoError);
     QCOMPARE(encodeVariant(&container, input), CborNoError);
     QCOMPARE(encodeVariant(&container, input), CborNoError);
-    QCOMPARE(container.added, size_t(3));
+    QCOMPARE(container.remaining, size_t(0));
     QCOMPARE(cbor_encoder_close_container_checked(&encoder, &container), CborErrorTooManyItems);
 }
 
@@ -710,7 +728,7 @@ void tst_Encoder::illegalSimpleType()
     quint8 buf[2];
     CborEncoder encoder;
     cbor_encoder_init(&encoder, buf, sizeof(buf), 0);
-    QCOMPARE(int(cbor_encode_simple_value(&encoder, type)), int(CborErrorIllegalSimpleType));
+    QCOMPARE(cbor_encode_simple_value(&encoder, type), CborErrorIllegalSimpleType);
 }
 
 QTEST_MAIN(tst_Encoder)

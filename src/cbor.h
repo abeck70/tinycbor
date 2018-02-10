@@ -162,7 +162,7 @@ typedef enum CborError {
     CborErrorGarbageAtEnd = 256,
     CborErrorUnexpectedEOF,
     CborErrorUnexpectedBreak,
-    CborErrorUnknownType,           /* can only heppen in major type 7 */
+    CborErrorUnknownType,           /* can only happen in major type 7 */
     CborErrorIllegalType,           /* type not allowed here */
     CborErrorIllegalNumber,
     CborErrorIllegalSimpleType,     /* types of value less than 32 encoded in two bytes */
@@ -191,7 +191,7 @@ typedef enum CborError {
     CborErrorUnsupportedType,
 
     /* errors in converting to JSON */
-    CborErrorJsonObjectKeyIsAggregate,
+    CborErrorJsonObjectKeyIsAggregate = 1280,
     CborErrorJsonObjectKeyNotString,
     CborErrorJsonNotImplemented,
 
@@ -209,7 +209,7 @@ struct CborEncoder
         ptrdiff_t bytes_needed;
     } data;
     const uint8_t *end;
-    size_t added;
+    size_t remaining;
     int flags;
 };
 typedef struct CborEncoder CborEncoder;
@@ -452,21 +452,6 @@ CBOR_INLINE_API CborError cbor_value_dup_byte_string(const CborValue *value, uin
     return _cbor_value_dup_string(value, (void **)buffer, buflen, next);
 }
 
-CBOR_PRIVATE_API CborError _cbor_value_get_string_chunk(const CborValue *value, const void **bufferptr,
-                                                        size_t *len, CborValue *next);
-CBOR_INLINE_API CborError cbor_value_get_text_string_chunk(const CborValue *value, const char **bufferptr,
-                                                           size_t *len, CborValue *next)
-{
-    assert(cbor_value_is_text_string(value));
-    return _cbor_value_get_string_chunk(value, (const void **)bufferptr, len, next);
-}
-CBOR_INLINE_API CborError cbor_value_get_byte_string_chunk(const CborValue *value, const uint8_t **bufferptr,
-                                                           size_t *len, CborValue *next)
-{
-    assert(cbor_value_is_byte_string(value));
-    return _cbor_value_get_string_chunk(value, (const void **)bufferptr, len, next);
-}
-
 CBOR_API CborError cbor_value_text_string_equals(const CborValue *value, const char *string, bool *result);
 
 /* Maps and arrays */
@@ -573,24 +558,32 @@ enum CborValidationFlags {
 
 CBOR_API CborError cbor_value_validate(const CborValue *it, int flags);
 
-/* The following API requires a hosted C implementation (uses FILE*) */
-#if !defined(__STDC_HOSTED__) || __STDC_HOSTED__-0 == 1
-
 /* Human-readable (dump) API */
 
 enum CborPrettyFlags {
     CborPrettyNumericEncodingIndicators     = 0x01,
     CborPrettyTextualEncodingIndicators     = 0,
 
-    CborPrettyIndicateIndetermineLength     = 0x02,
+    CborPrettyIndicateIndeterminateLength   = 0x02,
+    CborPrettyIndicateIndetermineLength     = CborPrettyIndicateIndeterminateLength, /* deprecated */
     CborPrettyIndicateOverlongNumbers       = 0x04,
 
     CborPrettyShowStringFragments           = 0x100,
     CborPrettyMergeStringFragments          = 0,
 
-    CborPrettyDefaultFlags          = CborPrettyIndicateIndetermineLength
+    CborPrettyDefaultFlags          = CborPrettyIndicateIndeterminateLength
 };
 
+typedef CborError (*CborStreamFunction)(void *token, const char *fmt, ...)
+#ifdef __GNUC__
+    __attribute__((__format__(printf, 2, 3)))
+#endif
+;
+
+CBOR_API CborError cbor_value_to_pretty_stream(CborStreamFunction streamFunction, void *token, CborValue *value, int flags);
+
+/* The following API requires a hosted C implementation (uses FILE*) */
+#if !defined(__STDC_HOSTED__) || __STDC_HOSTED__-0 == 1
 CBOR_API CborError cbor_value_to_pretty_advance_flags(FILE *out, CborValue *value, int flags);
 CBOR_API CborError cbor_value_to_pretty_advance(FILE *out, CborValue *value);
 CBOR_INLINE_API CborError cbor_value_to_pretty(FILE *out, const CborValue *value)
@@ -598,7 +591,6 @@ CBOR_INLINE_API CborError cbor_value_to_pretty(FILE *out, const CborValue *value
     CborValue copy = *value;
     return cbor_value_to_pretty_advance_flags(out, &copy, CborPrettyDefaultFlags);
 }
-
 #endif /* __STDC_HOSTED__ check */
 
 #ifdef __cplusplus
